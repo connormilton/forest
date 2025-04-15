@@ -80,8 +80,35 @@ class ScoutAgent:
                 "response_format": {"type": "json_object"}
             }
             
-            # Call API
-            response = openai.chat.completions.create(**params)
+            # Set a timeout to avoid hanging
+            import os
+            timeout = int(os.getenv("OPENAI_API_REQUEST_TIMEOUT", "60"))
+            
+            # Call API with error handling for platform detection issues
+            try:
+                # Call API
+                response = openai.chat.completions.create(**params, timeout=timeout)
+            except Exception as platform_error:
+                # Handle platform detection errors by temporarily modifying environment
+                import platform as py_platform
+                original_platform = py_platform.platform
+                
+                # Create a wrapper that catches errors
+                def safe_platform(*args, **kwargs):
+                    try:
+                        return original_platform(*args, **kwargs)
+                    except:
+                        return "Windows-10"  # Safe fallback
+                
+                # Apply the patch
+                py_platform.platform = safe_platform
+                
+                # Try again with patched platform detection
+                logger.warning(f"Retrying API call after platform error: {platform_error}")
+                response = openai.chat.completions.create(**params, timeout=timeout)
+                
+                # Restore original function
+                py_platform.platform = original_platform
             
             # Log usage
             usage = response.usage

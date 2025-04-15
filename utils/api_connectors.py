@@ -11,29 +11,75 @@ from polygon import RESTClient
 logger = logging.getLogger("CollaborativeTrader")
 
 def get_ig_service():
-    """Connect to IG API"""
+    """Connect to IG API and work with whatever account is active"""
     try:
+        # Get desired account ID
+        desired_account = os.getenv("IG_ACCOUNT_ID", "INRKZ")
+        
+        # Basic connection to IG API
         ig = IGService(
             username=os.getenv("IG_USERNAME"),
             password=os.getenv("IG_PASSWORD"),
             api_key=os.getenv("IG_API_KEY"),
-            acc_type=os.getenv("IG_ACC_TYPE", "LIVE")  # Set default to LIVE
+            acc_type=os.getenv("IG_ACC_TYPE", "DEMO")
         )
-        ig.create_session()
         
-        # Just log success and return without trying to switch accounts
+        # Create session
+        ig.create_session()
         logger.info("IG API connected successfully")
         
-        # Display current account info for debugging
+        # Check active account
         try:
             accounts = ig.fetch_accounts()
-            current_acc = accounts.iloc[0]
-            logger.info(f"Active account: {current_acc['accountId']} ({current_acc['accountType']})")
-            logger.info(f"Account balance: {current_acc['balance']} {current_acc['currency']}")
+            logger.info(f"Found {len(accounts)} accounts")
+            
+            # Display all available accounts
+            available_accounts = []
+            for _, account in accounts.iterrows():
+                account_id = account['accountId']
+                account_type = account['accountType']
+                account_balance = account['balance']
+                account_currency = account['currency']
+                
+                available_accounts.append(account_id)
+                logger.info(f"Account: {account_id} ({account_type}) - Balance: {account_balance} {account_currency}")
+            
+            # Check active account
+            active_account = accounts.iloc[0]['accountId']
+            logger.info(f"Active account: {active_account}")
+            
+            # Provide warning if not using desired account
+            if active_account != desired_account:
+                warning_message = f"WARNING: Using account {active_account} instead of desired account {desired_account}"
+                logger.warning(f"{'*' * 20}")
+                logger.warning(warning_message)
+                logger.warning(f"IG API is not connecting to the requested account despite multiple attempts")
+                logger.warning(f"Proceeding with available account {active_account}")
+                logger.warning(f"{'*' * 20}")
+                
+                # Print to console as well for visibility
+                print(f"\n{'*' * 60}")
+                print(f"WARNING: USING ACCOUNT {active_account} INSTEAD OF {desired_account}")
+                print(f"{'*' * 60}\n")
+            else:
+                logger.info(f"Successfully connected to desired account {desired_account}")
+                
+            # Display balance of active account
+            active_balance = accounts[accounts['accountId'] == active_account].iloc[0]['balance']
+            active_currency = accounts[accounts['accountId'] == active_account].iloc[0]['currency']
+            logger.info(f"Active account balance: {active_balance} {active_currency}")
+            
+            # Check if balance is sufficient for trading
+            if active_balance <= 0:
+                logger.warning(f"Account {active_account} has insufficient balance: {active_balance} {active_currency}")
+                print(f"\nWARNING: ACCOUNT BALANCE IS {active_balance} {active_currency}")
+                print(f"The system may not be able to execute trades with this balance\n")
+                
         except Exception as e:
-            logger.error(f"Error getting account info: {e}")
+            logger.error(f"Error checking account details: {e}")
         
         return ig
+    
     except Exception as e:
         logger.error(f"IG connection error: {e}")
         return None
@@ -46,6 +92,18 @@ def execute_trade(ig_service, trade):
     """Execute a new trade on IG platform"""
     try:
         logger.info(f"Executing {trade.get('direction')} {trade.get('epic')} | Size: {trade.get('size')}")
+        
+        # Check if we have account info before attempting trade
+        try:
+            accounts = ig_service.fetch_accounts()
+            active_account = accounts.iloc[0]['accountId']
+            active_balance = accounts.iloc[0]['balance']
+            active_currency = accounts.iloc[0]['currency']
+            
+            if active_balance <= 0:
+                logger.warning(f"Attempting to trade with account {active_account} that has balance: {active_balance} {active_currency}")
+        except Exception as check_error:
+            logger.warning(f"Could not verify account balance before trade: {check_error}")
         
         # Directly based on working code from grasshooper.py
         response = ig_service.create_open_position(
