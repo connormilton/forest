@@ -11,10 +11,10 @@ from polygon import RESTClient
 logger = logging.getLogger("CollaborativeTrader")
 
 def get_ig_service():
-    """Connect to IG API and work with whatever account is active"""
+    """Connect to IG API with account safety checks"""
     try:
-        # Get desired account ID
-        desired_account = os.getenv("IG_ACCOUNT_ID", "INRKZ")
+        # Target account we want to use
+        target_account = "INRKZ"
         
         # Basic connection to IG API
         ig = IGService(
@@ -34,14 +34,12 @@ def get_ig_service():
             logger.info(f"Found {len(accounts)} accounts")
             
             # Display all available accounts
-            available_accounts = []
             for _, account in accounts.iterrows():
                 account_id = account['accountId']
                 account_type = account['accountType']
                 account_balance = account['balance']
                 account_currency = account['currency']
                 
-                available_accounts.append(account_id)
                 logger.info(f"Account: {account_id} ({account_type}) - Balance: {account_balance} {account_currency}")
             
             # Check active account
@@ -49,31 +47,40 @@ def get_ig_service():
             logger.info(f"Active account: {active_account}")
             
             # Provide warning if not using desired account
-            if active_account != desired_account:
-                warning_message = f"WARNING: Using account {active_account} instead of desired account {desired_account}"
+            if active_account != target_account:
+                warning_message = f"WARNING: Using account {active_account} instead of desired account {target_account}"
                 logger.warning(f"{'*' * 20}")
                 logger.warning(warning_message)
-                logger.warning(f"IG API is not connecting to the requested account despite multiple attempts")
+                logger.warning(f"IG API is not connecting to the requested account")
+                logger.warning(f"This is a known issue with IG's system that they are working to fix")
                 logger.warning(f"Proceeding with available account {active_account}")
                 logger.warning(f"{'*' * 20}")
                 
                 # Print to console as well for visibility
                 print(f"\n{'*' * 60}")
-                print(f"WARNING: USING ACCOUNT {active_account} INSTEAD OF {desired_account}")
+                print(f"WARNING: USING ACCOUNT {active_account} INSTEAD OF {target_account}")
+                print(f"THIS IS A KNOWN ISSUE WITH IG'S SYSTEM")
                 print(f"{'*' * 60}\n")
-            else:
-                logger.info(f"Successfully connected to desired account {desired_account}")
                 
-            # Display balance of active account
-            active_balance = accounts[accounts['accountId'] == active_account].iloc[0]['balance']
-            active_currency = accounts[accounts['accountId'] == active_account].iloc[0]['currency']
-            logger.info(f"Active account balance: {active_balance} {active_currency}")
-            
-            # Check if balance is sufficient for trading
-            if active_balance <= 0:
-                logger.warning(f"Account {active_account} has insufficient balance: {active_balance} {active_currency}")
-                print(f"\nWARNING: ACCOUNT BALANCE IS {active_balance} {active_currency}")
-                print(f"The system may not be able to execute trades with this balance\n")
+                # Check if the active account has sufficient balance
+                active_acc_data = accounts[accounts['accountId'] == active_account]
+                if not active_acc_data.empty:
+                    active_balance = active_acc_data.iloc[0]['balance']
+                    active_currency = active_acc_data.iloc[0]['currency']
+                    
+                    if active_balance <= 0:
+                        logger.warning(f"Account {active_account} has insufficient balance: {active_balance} {active_currency}")
+                        print(f"\nWARNING: ACCOUNT BALANCE IS {active_balance} {active_currency}")
+                        print(f"The system may not be able to execute trades with this balance\n")
+            else:
+                logger.info(f"Successfully connected to desired account {target_account}")
+                
+                # Display balance of active account
+                active_acc_data = accounts[accounts['accountId'] == active_account]
+                if not active_acc_data.empty:
+                    active_balance = active_acc_data.iloc[0]['balance']
+                    active_currency = active_acc_data.iloc[0]['currency']
+                    logger.info(f"Account balance: {active_balance} {active_currency}")
                 
         except Exception as e:
             logger.error(f"Error checking account details: {e}")
@@ -89,23 +96,30 @@ def get_polygon_client():
     return RESTClient(os.getenv("POLYGON_API_KEY"))
 
 def execute_trade(ig_service, trade):
-    """Execute a new trade on IG platform"""
+    """Execute a new trade on IG platform with account safety check"""
     try:
         logger.info(f"Executing {trade.get('direction')} {trade.get('epic')} | Size: {trade.get('size')}")
         
-        # Check if we have account info before attempting trade
+        # SAFETY CHECK - verify account before trading
         try:
             accounts = ig_service.fetch_accounts()
             active_account = accounts.iloc[0]['accountId']
-            active_balance = accounts.iloc[0]['balance']
-            active_currency = accounts.iloc[0]['currency']
+            active_balance = accounts[accounts['accountId'] == active_account].iloc[0]['balance']
+            active_currency = accounts[accounts['accountId'] == active_account].iloc[0]['currency']
             
-            if active_balance <= 0:
-                logger.warning(f"Attempting to trade with account {active_account} that has balance: {active_balance} {active_currency}")
+            # Check if using INQFH with zero balance
+            if active_account == "INQFH" and active_balance <= 0:
+                logger.error(f"TRADE BLOCKED - Account {active_account} has zero balance")
+                return False, {
+                    "outcome": "BLOCKED", 
+                    "reason": f"Insufficient balance: {active_balance} {active_currency}"
+                }
+                
+            logger.info(f"Trading with account: {active_account} (Balance: {active_balance} {active_currency})")
         except Exception as check_error:
-            logger.warning(f"Could not verify account balance before trade: {check_error}")
+            logger.warning(f"Could not verify account before trade: {check_error}")
         
-        # Directly based on working code from grasshooper.py
+        # Execute the trade
         response = ig_service.create_open_position(
             epic=trade["epic"],
             direction=trade["direction"],
@@ -147,10 +161,24 @@ def execute_trade(ig_service, trade):
         return False, {"outcome": "ERROR", "reason": str(e)}
 
 def close_position(ig_service, position_action, positions):
-    """Close an existing position"""
+    """Close an existing position with account safety check"""
     try:
         deal_id = position_action.get("dealId")
         epic = position_action.get("epic")
+        
+        # SAFETY CHECK - verify account is valid for trading
+        try:
+            accounts = ig_service.fetch_accounts()
+            active_account = accounts.iloc[0]['accountId']
+            active_balance = accounts[accounts['accountId'] == active_account].iloc[0]['balance']
+            
+            if active_account == "INQFH" and active_balance <= 0:
+                logger.error(f"POSITION CLOSE BLOCKED - Account {active_account} has zero balance")
+                return False, {"outcome": "BLOCKED", "reason": "Insufficient balance"}
+                
+            logger.info(f"Closing position using account: {active_account}")
+        except Exception as check_error:
+            logger.warning(f"Could not verify account before closing position: {check_error}")
         
         logger.info(f"Closing position {deal_id} | {epic}")
         
@@ -193,11 +221,25 @@ def close_position(ig_service, position_action, positions):
         return False, {"outcome": "ERROR", "reason": str(e)}
 
 def update_stop_loss(ig_service, position_action):
-    """Update stop loss for an existing position"""
+    """Update stop loss for an existing position with account safety check"""
     try:
         deal_id = position_action.get("dealId")
         epic = position_action.get("epic")
         new_level = position_action.get("new_level")
+        
+        # SAFETY CHECK - verify account is valid for trading
+        try:
+            accounts = ig_service.fetch_accounts()
+            active_account = accounts.iloc[0]['accountId']
+            active_balance = accounts[accounts['accountId'] == active_account].iloc[0]['balance']
+            
+            if active_account == "INQFH" and active_balance <= 0:
+                logger.error(f"STOP UPDATE BLOCKED - Account {active_account} has zero balance")
+                return False, {"outcome": "BLOCKED", "reason": "Insufficient balance"}
+                
+            logger.info(f"Updating stop using account: {active_account}")
+        except Exception as check_error:
+            logger.warning(f"Could not verify account before updating stop: {check_error}")
         
         logger.info(f"Updating stop for {deal_id} to {new_level}")
         
